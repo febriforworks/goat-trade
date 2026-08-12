@@ -1,2 +1,12 @@
-cloudscraper
 pandas
+requests
+yfinance
+SQLAlchemy
+psycopg2-binary
+python-dotenv
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+cloudscraper
+openpyxl
