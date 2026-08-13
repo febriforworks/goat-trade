@@ -23,13 +23,14 @@ Catatan penting:
 """
 
 import os
+import requests
 from dataclasses import dataclass
 from typing import List, Optional
 
 import numpy as np
 import pandas as pd
 from sqlalchemy.orm import Session
-from app.db.models import HistoricalPrice, DailyMarketData, Company
+from app.db.models import HistoricalPrice, DailyMarketData, Company, CorporateAction, CorporateActionType, StockStatus, ScreenerResult
 
 
 # ============================================================
@@ -125,7 +126,75 @@ def load_data_from_db(db: Session, ticker_code: str) -> pd.DataFrame:
     combined['NetForeign'] = combined['NetForeign'].fillna(0.0)
     combined.sort_index(inplace=True)
     
+    # Adjust for corporate actions
+    combined = apply_corporate_actions(combined, db, ticker_code)
+    
+    # 3. Query StockStatus
+    status_query = db.query(
+        StockStatus.date,
+        StockStatus.is_suspended,
+        StockStatus.ara_limit,
+        StockStatus.arb_limit
+    ).filter(StockStatus.company_code == ticker_code)
+    
+    status_df = pd.read_sql(status_query.statement, db.bind)
+    
+    if not status_df.empty:
+        status_df['date'] = pd.to_datetime(status_df['date'])
+        status_df = status_df.set_index('date')
+        combined = combined.join(status_df, how='left')
+    
+    # Fill missing status values with False/None as appropriate
+    if 'is_suspended' not in combined.columns:
+        combined['is_suspended'] = False
+        combined['ara_limit'] = pd.NA
+        combined['arb_limit'] = pd.NA
+    else:
+        combined['is_suspended'] = combined['is_suspended'].fillna(False).astype(bool)
+    
     return combined
+
+def apply_corporate_actions(df: pd.DataFrame, db: Session, ticker_code: str) -> pd.DataFrame:
+    """
+    Adjust historical prices (O,H,L,C,V) for corporate actions (splits/reverse splits).
+    """
+    if df.empty:
+        return df
+        
+    actions = db.query(CorporateAction).filter(
+        CorporateAction.company_code == ticker_code,
+        CorporateAction.action_type.in_([CorporateActionType.SPLIT, CorporateActionType.REVERSE_SPLIT])
+    ).order_by(CorporateAction.ex_date.desc()).all()
+    
+    if not actions:
+        return df
+        
+    df_adj = df.copy()
+    
+    for action in actions:
+        ex_date = pd.to_datetime(action.ex_date)
+        # Apply to all dates strictly BEFORE the ex_date
+        mask = df_adj.index < ex_date
+        ratio = float(action.ratio) if action.ratio else 1.0
+        
+        if action.action_type == CorporateActionType.SPLIT:
+            # 1:5 split (ratio=5) -> divide prices by 5, multiply volume by 5
+            multiplier = 1 / ratio
+            vol_multiplier = ratio
+        elif action.action_type == CorporateActionType.REVERSE_SPLIT:
+            # 5:1 split (ratio=5) -> multiply prices by 5, divide volume by 5
+            multiplier = ratio
+            vol_multiplier = 1 / ratio
+        else:
+            continue
+            
+        df_adj.loc[mask, 'Open'] *= multiplier
+        df_adj.loc[mask, 'High'] *= multiplier
+        df_adj.loc[mask, 'Low'] *= multiplier
+        df_adj.loc[mask, 'Close'] *= multiplier
+        df_adj.loc[mask, 'Volume'] *= vol_multiplier
+        
+    return df_adj
 
 
 # ============================================================
@@ -278,6 +347,7 @@ def run_screener(
     db: Session,
     tickers: List[str],
     cfg: ScreenerConfig,
+    save_to_db: bool = False
 ) -> pd.DataFrame:
     """
     Jalankan screener untuk banyak ticker sekaligus, kembalikan hasil
@@ -293,7 +363,28 @@ def run_screener(
     result_df = pd.DataFrame(results)
     if result_df.empty:
         return result_df
+        
     result_df = result_df.sort_values("score", ascending=False).reset_index(drop=True)
+    
+    if save_to_db:
+        # Save to database
+        records = []
+        for _, row in result_df.iterrows():
+            record = ScreenerResult(
+                date=pd.to_datetime(row['date']).date(),
+                company_code=row['ticker'],
+                score=row['score'],
+                trend_ok=row['trend_ok'],
+                breakout_ok=row['breakout_ok'],
+                volume_ok=row['volume_ok'],
+                foreign_ok=row['foreign_ok'],
+                close_price=row['close']
+            )
+            # Use merge to handle duplicates (if re-running on same date)
+            db.merge(record)
+        db.commit()
+        print(f"Disimpan {len(records)} hasil screener ke database.")
+        
     return result_df
 
 
@@ -314,7 +405,7 @@ if __name__ == "__main__":
         watchlist = [c.code for c in companies]
         
         print(f"Menjalankan screener untuk {len(watchlist)} emiten...")
-        hasil = run_screener(db, watchlist, cfg)
+        hasil = run_screener(db, watchlist, cfg, save_to_db=True)
         print(hasil)
     
         # Contoh: ambil saham dengan skor >= 3 dari 4 kriteria
@@ -322,5 +413,22 @@ if __name__ == "__main__":
             kandidat_kuat = hasil[hasil["score"] >= 3]
             print("\nKandidat breakout kuat:")
             print(kandidat_kuat)
+            
+            # Send payload to internal FastAPI endpoint
+            if not kandidat_kuat.empty:
+                # Convert DataFrame to list of dicts for JSON serialization
+                # We need to replace NaN with None and handle non-standard types
+                alerts_payload = kandidat_kuat.replace({np.nan: None}).to_dict(orient="records")
+                
+                try:
+                    # Asumsikan backend berjalan di localhost:8000
+                    api_url = "http://localhost:8000/api/alerts/notify"
+                    resp = requests.post(api_url, json={"alerts": alerts_payload}, timeout=5)
+                    if resp.status_code == 200:
+                        print("Berhasil mengirim sinyal ke Alert Service (WebSocket/Telegram).")
+                    else:
+                        print(f"Gagal mengirim sinyal: HTTP {resp.status_code}")
+                except Exception as e:
+                    print(f"Error menghubungi Alert Service: {e}")
     finally:
         db.close()

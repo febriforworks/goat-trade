@@ -17,6 +17,17 @@ cp .env.example .env
 ```
 *(The default `.env` configuration works perfectly out of the box with Docker).*
 
+#### 🔔 Telegram Alert Setup (Optional)
+To receive screener signals directly on your phone:
+1. Search for `@BotFather` on Telegram and send `/newbot`.
+2. Follow the steps and copy the **HTTP API Token**.
+3. Search for `@userinfobot` on Telegram to get your **Chat ID** (or use a group/channel ID).
+4. Add them to your `.env` file:
+   ```env
+   TELEGRAM_BOT_TOKEN=your_token_here
+   TELEGRAM_CHAT_ID=your_chat_id_here
+   ```
+
 ### Step 2: Run the Services
 Start the database and the API server in the background:
 ```bash
@@ -34,19 +45,25 @@ Docker will pull the necessary images, build the Python application, and spin ev
 ### Fetching Historical Data
 If you want to run the backtester or screener, you might want to fetch historical data first. You can run the data fetcher script inside the container:
 ```bash
-docker-compose exec api python fetch_past_daily.py
+docker-compose exec api python scripts/fetch_past_daily.py
+```
+
+### Database Fix/Migration
+To apply new database schema updates or additions, run:
+```bash
+docker-compose exec api python scripts/fix_db.py
 ```
 
 ### Running the Screener
 To run the screener framework:
 ```bash
-docker-compose exec api python idx_swing_screener_framework.py
+docker-compose exec api python app/services/screener.py
 ```
 
 ### Running the Backtester
 To run the backtester:
 ```bash
-docker-compose exec api python idx_swing_backtester.py
+docker-compose exec api python app/services/backtester.py
 ```
 
 ## 🛑 Stopping the Services

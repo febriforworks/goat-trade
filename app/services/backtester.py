@@ -35,7 +35,7 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 
-from idx_swing_screener_framework import (
+from app.services.screener import (
     ScreenerConfig,
     build_features,
     load_data_from_db,
@@ -43,7 +43,7 @@ from idx_swing_screener_framework import (
 )
 from sqlalchemy.orm import Session
 from app.db.database import SessionLocal
-from app.db.models import Company
+from app.db.models import Company, IndexMembership
 
 
 # ============================================================
@@ -58,7 +58,9 @@ class BacktestConfig:
     max_holding_days: int = 15            # exit paksa (dalam trading days) kalau belum kena SL/TP
     risk_per_trade_pct: float = 0.02      # risiko 2% dari modal per trade
     initial_capital: float = 100_000_000  # contoh: Rp100 juta, sesuaikan
-    commission_pct: float = 0.0015        # contoh: 0.15% per sisi transaksi (buy & sell)
+    buy_fee_pct: float = 0.0015           # 0.15% fee beli
+    sell_fee_pct: float = 0.0025          # 0.25% fee jual
+    max_volume_participation_pct: float = 0.1 # 10% dari VolumeAvg
 
 
 # ============================================================
@@ -79,14 +81,14 @@ class Trade:
     pnl: Optional[float] = None
     pnl_pct: Optional[float] = None
 
-    def close(self, exit_date, exit_price, exit_reason, commission_pct: float):
+    def close(self, exit_date, exit_price, exit_reason, buy_fee_pct: float, sell_fee_pct: float):
         self.exit_date = exit_date
         self.exit_price = exit_price
         self.exit_reason = exit_reason
 
         gross_pnl = (exit_price - self.entry_price) * self.shares
-        entry_cost = self.entry_price * self.shares * commission_pct
-        exit_cost = exit_price * self.shares * commission_pct
+        entry_cost = self.entry_price * self.shares * buy_fee_pct
+        exit_cost = exit_price * self.shares * sell_fee_pct
         self.pnl = gross_pnl - entry_cost - exit_cost
         self.pnl_pct = (exit_price - self.entry_price) / self.entry_price
 
@@ -124,6 +126,13 @@ def simulate_ticker(
             exit_reason = None
             exit_price = None
 
+            # Skip exit if suspended
+            is_suspended = next_row.get("is_suspended", False)
+            if is_suspended:
+                continue
+
+            arb_limit = next_row.get("arb_limit", pd.NA)
+
             # Asumsi konservatif: kalau Low & High sama-sama kena
             # stop/target di hari yang sama, stop loss dicek duluan.
             if next_row["Low"] <= open_trade.stop_price:
@@ -135,9 +144,13 @@ def simulate_ticker(
             elif holding_days >= backtest_cfg.max_holding_days:
                 exit_reason = "time_exit"
                 exit_price = next_row["Open"]
-
+                
             if exit_reason:
-                open_trade.close(tomorrow, exit_price, exit_reason, backtest_cfg.commission_pct)
+                # Conservative rule: if trying to exit, but price opens at or below ARB, skip exit
+                if not pd.isna(arb_limit) and next_row["Open"] <= arb_limit:
+                    continue
+                    
+                open_trade.close(tomorrow, exit_price, exit_reason, backtest_cfg.buy_fee_pct, backtest_cfg.sell_fee_pct)
                 trades.append(open_trade)
                 open_trade = None
                 entry_idx = None
@@ -146,13 +159,32 @@ def simulate_ticker(
         if open_trade is None:
             result = score_stock(df, today, screener_cfg)
             if result["score"] >= backtest_cfg.entry_score_threshold:
-                entry_price = df.loc[tomorrow, "Open"]
+                next_row = df.loc[tomorrow]
+                
+                # Cek Suspend & ARA
+                is_suspended = next_row.get("is_suspended", False)
+                if is_suspended:
+                    continue
+                    
+                ara_limit = next_row.get("ara_limit", pd.NA)
+                if not pd.isna(ara_limit) and next_row["Open"] >= ara_limit:
+                    # Gagal beli karena buka di ARA
+                    continue
+                    
+                entry_price = next_row["Open"]
                 stop_price = entry_price * (1 - backtest_cfg.stop_loss_pct)
                 target_price = entry_price * (1 + backtest_cfg.take_profit_pct)
 
                 risk_amount = backtest_cfg.initial_capital * backtest_cfg.risk_per_trade_pct
                 risk_per_share = entry_price - stop_price
                 shares = int(risk_amount / risk_per_share) if risk_per_share > 0 else 0
+                
+                # Batas likuiditas: maksimum porsi dari volume rata-rata
+                vol_avg = row.get("VolumeAvg", 0)
+                max_shares = int(vol_avg * backtest_cfg.max_volume_participation_pct)
+                
+                if max_shares > 0:
+                    shares = min(shares, max_shares)
 
                 if shares > 0:
                     open_trade = Trade(
@@ -161,7 +193,7 @@ def simulate_ticker(
                         entry_price=entry_price,
                         shares=shares,
                         stop_price=stop_price,
-                        target_price=target_price,
+                        target_price=target_price
                     )
                     entry_idx = i + 1
 
@@ -252,8 +284,12 @@ if __name__ == "__main__":
     db = SessionLocal()
 
     try:
-        companies = db.query(Company).filter(Company.is_lq45 == True).all()
-        watchlist = [c.code for c in companies]
+        # Mengambil emiten LQ45 yang masih aktif dari tabel IndexMembership
+        memberships = db.query(IndexMembership).filter(
+            IndexMembership.index_code == 'LQ45',
+            IndexMembership.end_date == None
+        ).all()
+        watchlist = [m.company_code for m in memberships]
         if not watchlist:
             watchlist = ["BBCA", "BBRI", "TLKM", "ASII", "ADRO"]
 
