@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from app.db.database import init_db
-from app.api.routes import scraper, alerts
+from app.api.routes import scraper, alerts, screener
 
 app = FastAPI(title="Goat IDX API", version="1.0.0")
 
@@ -10,6 +10,7 @@ def on_startup():
 
 app.include_router(scraper.router, prefix="/api/scrape", tags=["Scraper"])
 app.include_router(alerts.router, prefix="/api/alerts", tags=["Alerts"])
+app.include_router(screener.router, prefix="/api/screener", tags=["Screener"])
 
 @app.get("/")
 def read_root():

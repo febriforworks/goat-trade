@@ -35,6 +35,10 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 
+import os
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
 from app.services.screener import (
     ScreenerConfig,
     build_features,
@@ -52,10 +56,8 @@ from app.db.models import Company, IndexMembership
 
 @dataclass
 class BacktestConfig:
-    entry_score_threshold: int = 3        # minimal skor screener (dari 0-4) untuk entry
-    stop_loss_pct: float = 0.05           # 5% di bawah harga entry
-    take_profit_pct: float = 0.15         # 15% di atas harga entry
-    max_holding_days: int = 15            # exit paksa (dalam trading days) kalau belum kena SL/TP
+    entry_score_threshold: int = 95       # Minimal skor 95 (Breakout + Volume wajib)
+    max_holding_days: int = 999           # Dimatikan agar profit bisa berjalan sampai menyentuh SL/TP
     risk_per_trade_pct: float = 0.02      # risiko 2% dari modal per trade
     initial_capital: float = 100_000_000  # contoh: Rp100 juta, sesuaikan
     buy_fee_pct: float = 0.0015           # 0.15% fee beli
@@ -172,12 +174,26 @@ def simulate_ticker(
                     continue
                     
                 entry_price = next_row["Open"]
-                stop_price = entry_price * (1 - backtest_cfg.stop_loss_pct)
-                target_price = entry_price * (1 + backtest_cfg.take_profit_pct)
+                
+                # Gunakan Stop Loss dinamis dari screener (ATR/Swing Hybrid)
+                stop_price = result["stop_loss"]
+                
+                # Jika stop loss sama atau lebih besar dari entry (aneh), fallback ke 5%
+                if stop_price >= entry_price or pd.isna(stop_price):
+                    stop_price = entry_price * 0.95
+                    
+                # Risk to Reward = 1:3 (Kembali ke Let Profit Run)
+                risk_pts = entry_price - stop_price
+                target_price = entry_price + (risk_pts * 3)
 
                 risk_amount = backtest_cfg.initial_capital * backtest_cfg.risk_per_trade_pct
                 risk_per_share = entry_price - stop_price
                 shares = int(risk_amount / risk_per_share) if risk_per_share > 0 else 0
+                
+                # Bounding position sizing to not exceed available capital
+                max_affordable_shares = int(backtest_cfg.initial_capital / entry_price)
+                if shares > max_affordable_shares:
+                    shares = max_affordable_shares
                 
                 # Batas likuiditas: maksimum porsi dari volume rata-rata
                 vol_avg = row.get("VolumeAvg", 0)
@@ -235,9 +251,12 @@ def build_equity_curve(trades_df: pd.DataFrame, backtest_cfg: BacktestConfig) ->
     if trades_df.empty:
         return pd.DataFrame()
 
+    num_tickers = len(trades_df['ticker'].unique())
+    portfolio_initial_capital = backtest_cfg.initial_capital * num_tickers
+
     closed = trades_df.dropna(subset=["exit_date"]).sort_values("exit_date").copy()
     closed["cumulative_pnl"] = closed["pnl"].cumsum()
-    closed["equity"] = backtest_cfg.initial_capital + closed["cumulative_pnl"]
+    closed["equity"] = portfolio_initial_capital + closed["cumulative_pnl"]
     return closed
 
 
@@ -261,13 +280,20 @@ def summarize_performance(trades_df: pd.DataFrame, backtest_cfg: BacktestConfig)
     drawdown = (equity["equity"] - running_max) / running_max
     max_drawdown_pct = drawdown.min() if not drawdown.empty else 0.0
 
+    num_tickers = len(trades_df['ticker'].unique())
+    portfolio_initial_capital = backtest_cfg.initial_capital * num_tickers
+    total_pnl = closed["pnl"].sum()
+    total_return_pct = total_pnl / portfolio_initial_capital if portfolio_initial_capital > 0 else 0.0
+
     return {
         "total_trades": len(closed),
         "win_rate": len(wins) / len(closed) if len(closed) else 0.0,
         "avg_win_pct": wins["pnl_pct"].mean() if not wins.empty else 0.0,
         "avg_loss_pct": losses["pnl_pct"].mean() if not losses.empty else 0.0,
         "profit_factor": (total_profit / total_loss) if total_loss > 0 else np.nan,
-        "total_pnl": closed["pnl"].sum(),
+        "total_pnl": total_pnl,
+        "portfolio_initial_capital": portfolio_initial_capital,
+        "total_return_pct": total_return_pct,
         "max_drawdown_pct": max_drawdown_pct,
         "exit_reason_breakdown": closed["exit_reason"].value_counts().to_dict(),
     }
@@ -305,12 +331,34 @@ if __name__ == "__main__":
 
         print("Menjalankan backtest...")
         trades_df = run_backtest(price_data, screener_cfg, backtest_cfg)
-        print(trades_df)
-
+        
         if not trades_df.empty:
+            # Format tampilan dataframe
+            display_df = trades_df.copy()
+            if 'pnl' in display_df.columns:
+                display_df['pnl'] = display_df['pnl'].apply(lambda x: f"Rp {x:,.0f}" if pd.notna(x) else "")
+            if 'pnl_pct' in display_df.columns:
+                display_df['pnl_pct'] = display_df['pnl_pct'].apply(lambda x: f"{x:.2%}" if pd.notna(x) else "")
+            
+            print(display_df.to_string())
+
             stats = summarize_performance(trades_df, backtest_cfg)
             print("\nRingkasan performa:")
-            for k, v in stats.items():
-                print(f"  {k}: {v}")
+            print(f"  Total Trades: {stats['total_trades']}")
+            print(f"  Win Rate: {stats['win_rate']:.2%}")
+            print(f"  Avg Win Pct: {stats['avg_win_pct']:.2%}")
+            print(f"  Avg Loss Pct: {stats['avg_loss_pct']:.2%}")
+            
+            profit_factor = stats['profit_factor']
+            pf_str = f"{profit_factor:.2f}" if not pd.isna(profit_factor) else "N/A"
+            print(f"  Profit Factor: {pf_str}")
+            
+            print(f"  Total Capital Deployed: Rp {stats['portfolio_initial_capital']:,.0f}")
+            print(f"  Total PnL (Net Profit): Rp {stats['total_pnl']:,.0f}")
+            print(f"  Total Return Pct: {stats['total_return_pct']:.2%}")
+            print(f"  Max Drawdown: {stats['max_drawdown_pct']:.2%}")
+            print(f"  Exit Reason Breakdown: {stats['exit_reason_breakdown']}")
+        else:
+            print("Tidak ada trade yang tereksekusi.")
     finally:
         db.close()

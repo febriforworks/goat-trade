@@ -66,7 +66,29 @@ def format_telegram_message(alerts: List[Dict[str, Any]]) -> str:
         ticker = alert.get("ticker", "UNKNOWN")
         score = alert.get("score", 0)
         close_price = alert.get("close", 0)
-        msg += f"{idx}. <b>{ticker}</b> (Skor: {score}/4) - Harga: {close_price}\n"
+        
+        entry_low = alert.get("entry_range_low", close_price * 0.98)
+        entry_high = alert.get("entry_range_high", close_price * 1.02)
+        sl = alert.get("stop_loss", 0)
+        
+        tp1 = alert.get("tp1")
+        tp2 = alert.get("tp2")
+        tp3 = alert.get("tp3")
+        
+        msg += f"{idx}. <b>{ticker}</b> (Skor: {score}/100) ⭐\n"
+        msg += f"🛒 <b>Entry Range</b>: Rp {entry_low:,.0f} - Rp {entry_high:,.0f}\n"
+        msg += f"🛡️ <b>Stop Loss</b>: Rp {sl:,.0f}\n"
+        
+        if tp1:
+            msg += f"🎯 <b>TP1 (Resisten 1)</b>: Rp {tp1:,.0f}\n"
+        if tp2:
+            msg += f"🎯 <b>TP2 (Resisten 2)</b>: Rp {tp2:,.0f}\n"
+        if tp3:
+            msg += f"🎯 <b>TP3 (Resisten 3)</b>: Rp {tp3:,.0f}\n"
+        if not tp1:
+            msg += f"🚀 <b>Target</b>: All Time High / No Resistance (Let Your Profit Run)\n"
+            
+        msg += "\n"
     
-    msg += "\n<i>*Cek dashboard untuk detail lebih lanjut.</i>"
+    msg += "<i>*Gunakan lot sizing yang bijak. Gunakan fitur trailing stop jika profit sudah melebihi TP1.</i>"
     return msg

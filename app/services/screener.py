@@ -30,6 +30,10 @@ from typing import List, Optional
 import numpy as np
 import pandas as pd
 from sqlalchemy.orm import Session
+
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
 from app.db.models import HistoricalPrice, DailyMarketData, Company, CorporateAction, CorporateActionType, StockStatus, ScreenerResult
 
 
@@ -46,9 +50,14 @@ class ScreenerConfig:
     adx_threshold: float = 20.0
     breakout_lookback: int = 20
     volume_avg_period: int = 20
-    volume_multiplier: float = 1.5
+    volume_multiplier: float = 2.5
     foreign_flow_days: int = 5
     min_foreign_buy_days: int = 3  # minimal hari net buy dalam window di atas
+    min_transaction_value: int = 5_000_000_000
+    min_trading_days: int = 15
+    max_risk_pct: float = 0.08
+    breakout_recency_days: int = 3
+    max_extension_from_ma50: float = 0.10
 
 
 # ============================================================
@@ -235,6 +244,9 @@ def add_adx(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
     denom = (plus_di + minus_di).replace(0, np.nan)
     dx = 100 * (plus_di - minus_di).abs() / denom
     df["ADX"] = dx.rolling(period).mean()
+    df["Plus_DI"] = plus_di
+    df["Minus_DI"] = minus_di
+    df["ATR"] = atr
     return df
 
 
@@ -242,12 +254,17 @@ def add_breakout_levels(df: pd.DataFrame, cfg: ScreenerConfig) -> pd.DataFrame:
     df = df.copy()
     # shift(1) supaya highest high TIDAK termasuk candle hari ini sendiri
     df["HighestHigh"] = df["High"].rolling(cfg.breakout_lookback).max().shift(1)
+    df["SwingLow"] = df["Low"].rolling(cfg.breakout_lookback).min().shift(1)
     return df
 
 
-def add_volume_avg(df: pd.DataFrame, cfg: ScreenerConfig) -> pd.DataFrame:
+def add_liquidity_features(df: pd.DataFrame, cfg: ScreenerConfig) -> pd.DataFrame:
     df = df.copy()
+    df["Value"] = df["Close"] * df["Volume"]
+    df["ValueAvg"] = df["Value"].rolling(cfg.volume_avg_period).mean().shift(1)
     df["VolumeAvg"] = df["Volume"].rolling(cfg.volume_avg_period).mean().shift(1)
+    # count non-zero volume days
+    df["TradingDays20"] = (df["Volume"] > 0).rolling(cfg.volume_avg_period).sum().shift(1)
     return df
 
 
@@ -255,7 +272,7 @@ def build_features(df: pd.DataFrame, cfg: ScreenerConfig) -> pd.DataFrame:
     df = add_moving_averages(df, cfg)
     df = add_adx(df, cfg.adx_period)
     df = add_breakout_levels(df, cfg)
-    df = add_volume_avg(df, cfg)
+    df = add_liquidity_features(df, cfg)
     return df
 
 
@@ -268,13 +285,43 @@ def check_trend(row: pd.Series, cfg: ScreenerConfig) -> bool:
         return False
     uptrend = row["Close"] > row["MA_trend"] > row["MA_confirm"]
     strong_trend = row["ADX"] > cfg.adx_threshold
-    return bool(uptrend and strong_trend)
+    directional = row["Plus_DI"] > row["Minus_DI"]
+    return bool(uptrend and strong_trend and directional)
 
 
-def check_breakout(row: pd.Series) -> bool:
-    if pd.isna(row["HighestHigh"]):
+def check_liquidity(row: pd.Series, cfg: ScreenerConfig) -> bool:
+    if pd.isna(row["ValueAvg"]) or pd.isna(row["TradingDays20"]):
         return False
-    return bool(row["Close"] > row["HighestHigh"])
+    return bool(row["ValueAvg"] >= cfg.min_transaction_value and row["TradingDays20"] >= cfg.min_trading_days)
+
+
+def check_breakout(df: pd.DataFrame, as_of_date, cfg: ScreenerConfig) -> bool:
+    window = df.loc[:as_of_date].tail(cfg.breakout_recency_days)
+    if window.empty:
+        return False
+    
+    # Recency: breakout happened within last N days
+    recent_breakout = (window["Close"] > window["HighestHigh"]).any()
+    if not recent_breakout:
+        return False
+        
+    row = df.loc[as_of_date]
+    if pd.isna(row["MA_trend"]):
+        return False
+        
+    # Extension limit
+    extension = (row["Close"] - row["MA_trend"]) / row["MA_trend"]
+    if extension > cfg.max_extension_from_ma50:
+        return False
+        
+    # Candle Quality
+    candle_range = row["High"] - row["Low"]
+    if candle_range > 0:
+        close_location = (row["Close"] - row["Low"]) / candle_range
+        if close_location < 0.75:
+            return False
+            
+    return True
 
 
 def check_volume(row: pd.Series, cfg: ScreenerConfig) -> bool:
@@ -293,41 +340,154 @@ def check_foreign_flow(df: pd.DataFrame, as_of_date, cfg: ScreenerConfig) -> boo
     return positive_days >= cfg.min_foreign_buy_days
 
 
+def calculate_risk(row: pd.Series, cfg: ScreenerConfig) -> dict:
+    if pd.isna(row["ATR"]) or pd.isna(row["SwingLow"]):
+        return {"risk_ok": False, "stop_loss": 0.0, "risk_pct": 1.0, "atr": 0.0}
+        
+    sl_atr = row["Close"] - (2 * row["ATR"])
+    sl_swing = row["SwingLow"]
+    
+    # Hybrid SL: pick the higher/tighter one
+    final_sl = max(sl_atr, sl_swing)
+    
+    # Calculate Risk Pct
+    risk_pct = (row["Close"] - final_sl) / row["Close"] if row["Close"] > 0 else 1.0
+    risk_ok = risk_pct <= cfg.max_risk_pct
+    
+    return {
+        "risk_ok": bool(risk_ok),
+        "stop_loss": float(final_sl),
+        "risk_pct": float(risk_pct),
+        "atr": float(row["ATR"])
+    }
+
+def find_resistances(df: pd.DataFrame, as_of_date, current_price: float, lookback: int = 120) -> List[float]:
+    """Cari level resisten teknikal berdasarkan Swing Highs masa lalu."""
+    window = df.loc[:as_of_date].tail(lookback)
+    if len(window) < 5:
+        return []
+        
+    highs = window['High'].values
+    local_maxima = []
+    
+    # Deteksi Swing Highs
+    for i in range(2, len(highs)-2):
+        if highs[i] > highs[i-1] and highs[i] > highs[i-2] and highs[i] > highs[i+1] and highs[i] > highs[i+2]:
+            local_maxima.append(highs[i])
+            
+    # Hapus duplikat dan filter yang di atas current_price (dengan margin 1%)
+    resistances = sorted(list(set([r for r in local_maxima if r > current_price * 1.01])))
+    
+    # Cluster resistances yang berdekatan (misal beda < 3%)
+    clustered = []
+    for r in resistances:
+        if not clustered:
+            clustered.append(r)
+        else:
+            if (r - clustered[-1]) / clustered[-1] > 0.03:
+                clustered.append(r)
+                
+    return clustered
+
+
 # ============================================================
 # 5. SCORING
 # ============================================================
 
-def score_stock(df: pd.DataFrame, as_of_date, cfg: ScreenerConfig) -> dict:
-    """
-    Skor per kriteria (bukan strict AND filter) supaya kamu bisa melihat
-    saham mana yang paling banyak kriteria terpenuhi lalu diranking,
-    daripada langsung dibuang begitu satu syarat gagal.
-    """
+def score_stock(df: pd.DataFrame, as_of_date, cfg: ScreenerConfig, ihsg_bullish: bool = True) -> dict:
     row = df.loc[as_of_date]
+    
+    # 1. Hard Gates
     trend_ok = check_trend(row, cfg)
-    breakout_ok = check_breakout(row)
+    liquidity_ok = check_liquidity(row, cfg)
+    risk_data = calculate_risk(row, cfg)
+    
+    # Base failure state
+    result = {
+        "trend_ok": False,
+        "breakout_ok": False,
+        "volume_ok": False,
+        "foreign_ok": False,
+        "score": 0,
+        "stop_loss": risk_data["stop_loss"],
+        "risk_pct": risk_data["risk_pct"],
+        "atr": risk_data["atr"],
+        "transaction_value": float(row.get("ValueAvg", 0.0)),
+        "entry_range_low": 0.0,
+        "entry_range_high": 0.0,
+        "tp1": None,
+        "tp2": None,
+        "tp3": None
+    }
+    
+    if not (trend_ok and liquidity_ok and risk_data["risk_ok"] and ihsg_bullish):
+        return result
+
+    # 2. Soft Scoring
+    breakout_ok = check_breakout(df, as_of_date, cfg)
     volume_ok = check_volume(row, cfg)
     foreign_ok = check_foreign_flow(df, as_of_date, cfg)
+    
+    score = 0
+    if breakout_ok: score += 50
+    if volume_ok: score += 45
+    if foreign_ok: score += 5
 
-    score = sum([trend_ok, breakout_ok, volume_ok, foreign_ok])
+    # Kalkulasi Entry Range & Take Profits jika breakout
+    entry_range_low = row["Close"] * 0.98  # Buy on weakness 2%
+    entry_range_high = row["Close"] * 1.02 # Buy on strength breakout 2%
+    
+    # Ambil resistance terdekat
+    resistances = find_resistances(df, as_of_date, row["Close"])
+    
+    tp1 = resistances[0] if len(resistances) > 0 else None
+    tp2 = resistances[1] if len(resistances) > 1 else None
+    tp3 = resistances[2] if len(resistances) > 2 else None
 
-    return {
+    result.update({
         "trend_ok": trend_ok,
         "breakout_ok": breakout_ok,
         "volume_ok": volume_ok,
         "foreign_ok": foreign_ok,
         "score": score,
-    }
+        "entry_range_low": float(entry_range_low),
+        "entry_range_high": float(entry_range_high),
+        "tp1": float(tp1) if tp1 else None,
+        "tp2": float(tp2) if tp2 else None,
+        "tp3": float(tp3) if tp3 else None
+    })
+    return result
 
 
 # ============================================================
 # 6. SCREENER RUNNER
 # ============================================================
 
+from app.db.models import BenchmarkPrice
+
+def get_ihsg_regime(db: Session) -> bool:
+    """Cek apakah IHSG berada di atas MA50."""
+    try:
+        ihsg_data = db.query(BenchmarkPrice.close).filter(BenchmarkPrice.index_code == "^JKSE").order_by(BenchmarkPrice.date.desc()).limit(50).all()
+        if len(ihsg_data) < 50:
+            return True # Asumsikan bullish jika data tidak cukup
+        
+        closes = [float(x.close) for x in ihsg_data]
+        closes.reverse()
+        ma50 = sum(closes) / 50.0
+        current_close = closes[-1]
+        
+        return current_close > ma50
+    except Exception as e:
+        print(f"Error checking IHSG regime: {e}")
+        return True
+
+
 def screen_ticker(
     db: Session,
     ticker: str,
     cfg: ScreenerConfig,
+    ihsg_bullish: bool = True
 ) -> dict:
     """Jalankan seluruh pipeline untuk satu ticker, kembalikan hasil candle terakhir."""
     ticker_code = ticker.replace(".JK", "")
@@ -336,7 +496,7 @@ def screen_ticker(
     
     last_row = df.iloc[-1]
     
-    result = score_stock(df, last_row.name, cfg)
+    result = score_stock(df, last_row.name, cfg, ihsg_bullish=ihsg_bullish)
     result["ticker"] = ticker_code
     result["date"] = last_row.name
     result["close"] = last_row["Close"]
@@ -353,12 +513,17 @@ def run_screener(
     Jalankan screener untuk banyak ticker sekaligus, kembalikan hasil
     terurut berdasarkan skor tertinggi.
     """
+    ihsg_bullish = get_ihsg_regime(db)
+    print(f"IHSG Regime: {'Bullish (> MA50)' if ihsg_bullish else 'Bearish (< MA50)'}")
+    
     results = []
     for t in tickers:
         try:
-            results.append(screen_ticker(db, t, cfg))
+            results.append(screen_ticker(db, t, cfg, ihsg_bullish=ihsg_bullish))
         except Exception as e:
-            print(f"[SKIP] {t}: {e}")
+            # Skip logging for expected ValueError (Data kosong)
+            if "Data kosong" not in str(e):
+                print(f"[SKIP] {t}: {e}")
 
     result_df = pd.DataFrame(results)
     if result_df.empty:
@@ -367,9 +532,16 @@ def run_screener(
     result_df = result_df.sort_values("score", ascending=False).reset_index(drop=True)
     
     if save_to_db:
-        # Save to database
+        # Hanya simpan kandidat yang lolos Hard Gates dan Breakout agar DB tidak membengkak
+        db_df = result_df[(result_df["trend_ok"] == True) & (result_df["breakout_ok"] == True)]
+        
+        # Hapus data screener untuk tanggal yang sama agar tidak duplikat (menghindari UniqueViolation)
+        dates_to_clear = db_df['date'].unique()
+        for d in dates_to_clear:
+            db.query(ScreenerResult).filter(ScreenerResult.date == pd.to_datetime(d).date()).delete()
+            
         records = []
-        for _, row in result_df.iterrows():
+        for _, row in db_df.iterrows():
             record = ScreenerResult(
                 date=pd.to_datetime(row['date']).date(),
                 company_code=row['ticker'],
@@ -378,10 +550,15 @@ def run_screener(
                 breakout_ok=row['breakout_ok'],
                 volume_ok=row['volume_ok'],
                 foreign_ok=row['foreign_ok'],
-                close_price=row['close']
+                close_price=row['close'],
+                transaction_value=row.get('transaction_value'),
+                stop_loss=row.get('stop_loss'),
+                atr=row.get('atr'),
+                risk_pct=row.get('risk_pct')
             )
-            # Use merge to handle duplicates (if re-running on same date)
-            db.merge(record)
+            records.append(record)
+        
+        db.bulk_save_objects(records)
         db.commit()
         print(f"Disimpan {len(records)} hasil screener ke database.")
         
@@ -399,26 +576,28 @@ if __name__ == "__main__":
     db = SessionLocal()
     
     try:
-        # Ambil 100 perusahaan pertama sebagai contoh, 
-        # karena memproses semua saham tanpa paralel bisa lambat.
-        companies = db.query(Company).limit(100).all()
+        # Mengambil seluruh perusahaan yang ada di tabel Company (tidak lagi dibatasi 100)
+        # Catatan: memproses seluruh saham (~900+) tanpa paralel akan memakan waktu lebih lama.
+        companies = db.query(Company).all()
         watchlist = [c.code for c in companies]
         
         print(f"Menjalankan screener untuk {len(watchlist)} emiten...")
         hasil = run_screener(db, watchlist, cfg, save_to_db=True)
         print(hasil)
     
-        # Contoh: ambil saham dengan skor >= 3 dari 4 kriteria
+        # Filter kandidat kuat yang lolos hard gates dan valid breakout
         if not hasil.empty:
-            kandidat_kuat = hasil[hasil["score"] >= 3]
-            print("\nKandidat breakout kuat:")
-            print(kandidat_kuat)
+            kandidat_kuat = hasil[(hasil["trend_ok"] == True) & (hasil["breakout_ok"] == True)]
+            print("\nKandidat breakout kuat (Lolos Trend, Liquidity, Risk, Breakout):")
+            print(kandidat_kuat[["ticker", "close", "score", "stop_loss", "risk_pct", "transaction_value"]])
             
             # Send payload to internal FastAPI endpoint
             if not kandidat_kuat.empty:
                 # Convert DataFrame to list of dicts for JSON serialization
                 # We need to replace NaN with None and handle non-standard types
-                alerts_payload = kandidat_kuat.replace({np.nan: None}).to_dict(orient="records")
+                kandidat_kuat_str = kandidat_kuat.copy()
+                kandidat_kuat_str['date'] = kandidat_kuat_str['date'].astype(str)
+                alerts_payload = kandidat_kuat_str.replace({np.nan: None}).to_dict(orient="records")
                 
                 try:
                     # Asumsikan backend berjalan di localhost:8000

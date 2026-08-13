@@ -140,6 +140,15 @@ class BenchmarkPrice(Base):
     id = Column(Integer, primary_key=True, index=True)
     index_code = Column(String(50), nullable=False, index=True) # e.g., '^JKSE' for IHSG
     date = Column(Date, nullable=False, index=True)
+    open_price = Column(Numeric(25, 4), nullable=True)
+    high = Column(Numeric(25, 4), nullable=True)
+    low = Column(Numeric(25, 4), nullable=True)
+    close = Column(Numeric(25, 4), nullable=True)
+    volume = Column(BigInteger, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint('index_code', 'date', name='uq_benchmark_price_date'),
+    )
 
 class ScreenerResult(Base):
     __tablename__ = "screener_results"
@@ -153,6 +162,10 @@ class ScreenerResult(Base):
     volume_ok = Column(Boolean, nullable=False)
     foreign_ok = Column(Boolean, nullable=False)
     close_price = Column(Numeric(15, 2), nullable=True)
+    transaction_value = Column(Numeric(35, 4), nullable=True) # ADVT20
+    stop_loss = Column(Numeric(15, 2), nullable=True)
+    atr = Column(Numeric(15, 4), nullable=True)
+    risk_pct = Column(Numeric(10, 4), nullable=True)
 
     __table_args__ = (
         UniqueConstraint('date', 'company_code', name='uq_screener_result_date'),
