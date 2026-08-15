@@ -4,19 +4,32 @@ from app.db.database import get_db
 from app.db.models import Company
 from app.services.screener import ScreenerConfig, run_screener
 from app.services.notifier import ws_manager, send_telegram_alert, format_telegram_message
+from datetime import datetime
 import numpy as np
 
 router = APIRouter()
 
-@router.post("/run")
+@router.api_route("/run", methods=["GET", "POST"])
 async def execute_screener(db: Session = Depends(get_db)):
     """
     Menjalankan proses screener untuk seluruh emiten.
+    - Otomatis skip jika akhir pekan (Sabtu/Minggu)
     - Menghitung indikator teknikal (MA, ADX, Breakout, Volume)
     - Memeriksa akumulasi asing
     - Menyimpan hasil ke database
-    - Mengirim notifikasi WebSocket dan Telegram jika ada kandidat kuat (score >= 3)
+    - Mengirim notifikasi WebSocket dan Telegram jika ada kandidat kuat
     """
+    # 0. Cek Akhir Pekan
+    today = datetime.now()
+    if today.weekday() >= 5:
+        return {
+            "status": "ok",
+            "message": "Hari ini adalah akhir pekan (Sabtu/Minggu). Bursa tutup, screener otomatis dilewati.",
+            "total_screened": 0,
+            "total_kandidat": 0,
+            "data": []
+        }
+
     cfg = ScreenerConfig()
     
     # 1. Fetch companies

@@ -1,0 +1,23 @@
+{
+  "functions": {
+    "api/index.py": {
+      "maxDuration": 60
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/api/index.py"
+    }
+  ],
+  "crons": [
+    {
+      "path": "/api/scrape/today",
+      "schedule": "0 10 * * 1-5"
+    },
+    {
+      "path": "/api/screener/run",
+      "schedule": "15 10 * * 1-5"
+    }
+  ]
+}

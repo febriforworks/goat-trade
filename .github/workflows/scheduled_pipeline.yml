@@ -1,0 +1,55 @@
+name: Goat IDX Screener Scheduled Pipeline
+
+on:
+  schedule:
+    # 17:00 WIB (10:00 UTC) Senin - Jumat: Fetch Today EOD Data
+    - cron: '0 10 * * 1-5'
+    # 17:15 WIB (10:15 UTC) Senin - Jumat: Run Swing Screener & Send Alerts
+    - cron: '15 10 * * 1-5'
+  workflow_dispatch: # Memungkinkan eksekusi manual via GitHub UI
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Execute Pipeline based on Schedule
+        env:
+          DB_HOST: ${{ secrets.DB_HOST }}
+          DB_PORT: ${{ secrets.DB_PORT }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          DB_NAME: ${{ secrets.DB_NAME }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          CURRENT_MIN=$(date -u +%M)
+          CURRENT_HOUR=$(date -u +%H)
+          echo "Current UTC Time: $CURRENT_HOUR:$CURRENT_MIN"
+          
+          # Jika jam 10:00 - 10:10 UTC (17:00 WIB), jalankan fetch today
+          if [ "$CURRENT_HOUR" -eq 10 ] && [ "$CURRENT_MIN" -lt 10 ]; then
+            echo "Menjalankan Fetch Today (EOD IDX Data)..."
+            python -m scripts.fetch_today
+          # Jika jam 10:11 - 10:30 UTC (17:15 WIB), jalankan screener
+          elif [ "$CURRENT_HOUR" -eq 10 ] && [ "$CURRENT_MIN" -ge 10 ]; then
+            echo "Menjalankan Screener & Telegram Alert..."
+            python -m app.services.screener
+          else
+            echo "Manual trigger atau jadwal lain: menjalankan fetch data lalu screener..."
+            python -m scripts.fetch_today
+            python -m app.services.screener
+          fi

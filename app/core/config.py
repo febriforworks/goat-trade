@@ -7,6 +7,8 @@ class Settings(BaseSettings):
     db_user: str = "postgres"
     db_password: str = ""
     db_name: str = "saham_idx"
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
     
     @property
     def database_url(self) -> str:

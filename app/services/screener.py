@@ -47,17 +47,18 @@ class ScreenerConfig:
     ma_long_trend: int = 50
     ma_long_confirm: int = 200
     adx_period: int = 14
-    adx_threshold: float = 20.0
+    adx_threshold: float = 15.0
     breakout_lookback: int = 20
     volume_avg_period: int = 20
-    volume_multiplier: float = 2.5
+    volume_multiplier: float = 1.35
     foreign_flow_days: int = 5
     min_foreign_buy_days: int = 3  # minimal hari net buy dalam window di atas
-    min_transaction_value: int = 5_000_000_000
+    min_transaction_value: int = 2_000_000_000
     min_trading_days: int = 15
     max_risk_pct: float = 0.08
     breakout_recency_days: int = 3
-    max_extension_from_ma50: float = 0.10
+    max_extension_from_ma50: float = 0.15
+    candle_close_threshold: float = 0.60
 
 
 # ============================================================
@@ -283,7 +284,8 @@ def build_features(df: pd.DataFrame, cfg: ScreenerConfig) -> pd.DataFrame:
 def check_trend(row: pd.Series, cfg: ScreenerConfig) -> bool:
     if pd.isna(row["MA_trend"]) or pd.isna(row["MA_confirm"]) or pd.isna(row["ADX"]):
         return False
-    uptrend = row["Close"] > row["MA_trend"] > row["MA_confirm"]
+    # Trend filter: Close > MA50 and MA50 is structurally healthy (above or within 2% of MA200)
+    uptrend = (row["Close"] > row["MA_trend"]) and (row["MA_trend"] >= row["MA_confirm"] * 0.98)
     strong_trend = row["ADX"] > cfg.adx_threshold
     directional = row["Plus_DI"] > row["Minus_DI"]
     return bool(uptrend and strong_trend and directional)
@@ -309,16 +311,16 @@ def check_breakout(df: pd.DataFrame, as_of_date, cfg: ScreenerConfig) -> bool:
     if pd.isna(row["MA_trend"]):
         return False
         
-    # Extension limit
+    # Extension limit from MA50
     extension = (row["Close"] - row["MA_trend"]) / row["MA_trend"]
     if extension > cfg.max_extension_from_ma50:
         return False
         
-    # Candle Quality
+    # Candle Quality: Close location within the day's high-low range
     candle_range = row["High"] - row["Low"]
     if candle_range > 0:
         close_location = (row["Close"] - row["Low"]) / candle_range
-        if close_location < 0.75:
+        if close_location < cfg.candle_close_threshold:
             return False
             
     return True
@@ -429,9 +431,10 @@ def score_stock(df: pd.DataFrame, as_of_date, cfg: ScreenerConfig, ihsg_bullish:
     foreign_ok = check_foreign_flow(df, as_of_date, cfg)
     
     score = 0
-    if breakout_ok: score += 50
-    if volume_ok: score += 45
-    if foreign_ok: score += 5
+    if breakout_ok: score += 45
+    if volume_ok: score += 35
+    if foreign_ok: score += 15
+    if row.get("ADX", 0) > 25: score += 5  # Strong momentum booster
 
     # Kalkulasi Entry Range & Take Profits jika breakout
     entry_range_low = row["Close"] * 0.98  # Buy on weakness 2%
@@ -570,14 +573,18 @@ def run_screener(
 # ============================================================
 
 if __name__ == "__main__":
+    from datetime import datetime
     from app.db.database import SessionLocal
     
+    today = datetime.now()
+    if today.weekday() >= 5:
+        print("Hari ini adalah akhir pekan (Sabtu/Minggu). Bursa tutup, screener dilewati.")
+        sys.exit(0)
+
     cfg = ScreenerConfig()
     db = SessionLocal()
     
     try:
-        # Mengambil seluruh perusahaan yang ada di tabel Company (tidak lagi dibatasi 100)
-        # Catatan: memproses seluruh saham (~900+) tanpa paralel akan memakan waktu lebih lama.
         companies = db.query(Company).all()
         watchlist = [c.code for c in companies]
         
@@ -591,23 +598,24 @@ if __name__ == "__main__":
             print("\nKandidat breakout kuat (Lolos Trend, Liquidity, Risk, Breakout):")
             print(kandidat_kuat[["ticker", "close", "score", "stop_loss", "risk_pct", "transaction_value"]])
             
-            # Send payload to internal FastAPI endpoint
             if not kandidat_kuat.empty:
-                # Convert DataFrame to list of dicts for JSON serialization
-                # We need to replace NaN with None and handle non-standard types
                 kandidat_kuat_str = kandidat_kuat.copy()
                 kandidat_kuat_str['date'] = kandidat_kuat_str['date'].astype(str)
                 alerts_payload = kandidat_kuat_str.replace({np.nan: None}).to_dict(orient="records")
                 
                 try:
-                    # Asumsikan backend berjalan di localhost:8000
+                    # 1. Coba kirim via endpoint FastAPI jika backend berjalan
                     api_url = "http://localhost:8000/api/alerts/notify"
-                    resp = requests.post(api_url, json={"alerts": alerts_payload}, timeout=5)
+                    resp = requests.post(api_url, json={"alerts": alerts_payload}, timeout=3)
                     if resp.status_code == 200:
                         print("Berhasil mengirim sinyal ke Alert Service (WebSocket/Telegram).")
                     else:
-                        print(f"Gagal mengirim sinyal: HTTP {resp.status_code}")
-                except Exception as e:
-                    print(f"Error menghubungi Alert Service: {e}")
+                        raise Exception(f"HTTP {resp.status_code}")
+                except Exception:
+                    # 2. Fallback: kirim langsung via notifier module (misal di GitHub Actions / CLI standalone)
+                    from app.services.notifier import send_telegram_alert, format_telegram_message
+                    telegram_msg = format_telegram_message(alerts_payload)
+                    if send_telegram_alert(telegram_msg):
+                        print("Berhasil mengirim alert Telegram secara langsung.")
     finally:
         db.close()

@@ -2,6 +2,7 @@ import os
 import requests
 from typing import List, Dict, Any
 from fastapi import WebSocket
+from app.core.config import settings
 
 class ConnectionManager:
     def __init__(self):
@@ -31,8 +32,8 @@ def send_telegram_alert(message: str) -> bool:
     Sends a message to the configured Telegram chat.
     Returns True if successful, False otherwise.
     """
-    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+    bot_token = settings.telegram_bot_token or os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = settings.telegram_chat_id or os.getenv("TELEGRAM_CHAT_ID")
 
     if not bot_token or not chat_id:
         print("[Notifier] Telegram token or chat ID is not configured. Skipping Telegram alert.")
