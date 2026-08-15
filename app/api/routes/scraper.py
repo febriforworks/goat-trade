@@ -7,9 +7,10 @@ from scripts.fetch_past_daily import fetch_daily_data_idx_by_date
 
 router = APIRouter()
 
-@router.api_route("/today", methods=["GET", "POST"])
+@router.get("/today", summary="Fetch Today EOD Data")
+@router.post("/today", include_in_schema=False)
 def sync_today_data(db: Session = Depends(get_db)):
-    """Fetch daily data for today (EOD) from IDX. Accessible via GET and POST (for Vercel Cron)."""
+    """Fetch daily data for today (EOD) from IDX. Accessible via GET and POST."""
     try:
         today = datetime.now()
         if today.weekday() >= 5:

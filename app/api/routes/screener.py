@@ -9,7 +9,8 @@ import numpy as np
 
 router = APIRouter()
 
-@router.api_route("/run", methods=["GET", "POST"])
+@router.get("/run", summary="Execute Screener")
+@router.post("/run", include_in_schema=False)
 async def execute_screener(db: Session = Depends(get_db)):
     """
     Menjalankan proses screener untuk seluruh emiten.
