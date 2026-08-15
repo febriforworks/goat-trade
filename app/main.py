@@ -4,10 +4,7 @@ from app.api.routes import scraper, alerts, screener
 
 app = FastAPI(
     title="Goat IDX API", 
-    version="1.0.0",
-    docs_url="/api/docs",
-    openapi_url="/api/openapi.json",
-    redoc_url="/api/redoc"
+    version="1.0.0"
 )
 
 app.include_router(scraper.router, prefix="/api/scrape", tags=["Scraper"])
