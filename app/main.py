@@ -16,8 +16,8 @@ app.include_router(scraper.router, prefix="/api/scrape", tags=["Scraper"])
 app.include_router(alerts.router, prefix="/api/alerts", tags=["Alerts"])
 app.include_router(screener.router, prefix="/api/screener", tags=["Screener"])
 
-@app.get("/docs", include_in_schema=False)
 @app.get("/api/docs", include_in_schema=False)
+@app.get("/docs", include_in_schema=False)
 async def swagger_ui():
     return get_swagger_ui_html(
         openapi_url="/api/openapi.json",
@@ -26,8 +26,8 @@ async def swagger_ui():
         swagger_css_url="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css",
     )
 
-@app.get("/redoc", include_in_schema=False)
 @app.get("/api/redoc", include_in_schema=False)
+@app.get("/redoc", include_in_schema=False)
 async def redoc_ui():
     return get_redoc_html(
         openapi_url="/api/openapi.json",
@@ -35,8 +35,8 @@ async def redoc_ui():
         redoc_js_url="https://cdn.jsdelivr.net/npm/redoc@next/bundles/redoc.standalone.js",
     )
 
-@app.get("/openapi.json", include_in_schema=False)
 @app.get("/api/openapi.json", include_in_schema=False)
+@app.get("/openapi.json", include_in_schema=False)
 async def openapi_schema():
     return JSONResponse(app.openapi())
 
@@ -45,6 +45,8 @@ def initialize_database():
     init_db()
     return {"message": "Database tables created successfully"}
 
+@app.get("/api")
+@app.get("/api/")
 @app.get("/")
 def read_root():
     return {
