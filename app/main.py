@@ -1,7 +1,6 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.openapi.docs import get_swagger_ui_html, get_redoc_html
 from fastapi.responses import JSONResponse
-from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.db.database import init_db
 from app.api.routes import scraper, alerts, screener
 
@@ -53,26 +52,3 @@ def read_root():
         "docs": "/api/docs",
         "redoc": "/api/redoc"
     }
-
-@app.exception_handler(StarletteHTTPException)
-async def custom_http_exception_handler(request: Request, exc: StarletteHTTPException):
-    if exc.status_code == 404:
-        headers_dict = {}
-        for k, v in request.scope.get("headers", []):
-            try:
-                key = k.decode('utf-8') if isinstance(k, bytes) else str(k)
-                val = v.decode('utf-8') if isinstance(v, bytes) else str(v)
-                headers_dict[key] = val
-            except Exception:
-                pass
-        return JSONResponse(
-            status_code=404,
-            content={
-                "detail": "Not Found",
-                "request_url_path": request.url.path,
-                "scope_path": request.scope.get("path"),
-                "scope_root_path": request.scope.get("root_path"),
-                "headers": headers_dict
-            }
-        )
-    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
