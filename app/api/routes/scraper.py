@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from datetime import datetime
 from app.db.database import get_db
+from app.core.timezone import get_jakarta_now
 from app.services import scraper_service
 from scripts.fetch_past_daily import fetch_daily_data_idx_by_date
 
@@ -12,13 +12,13 @@ router = APIRouter()
 def sync_today_data(db: Session = Depends(get_db)):
     """Fetch daily data for today (EOD) from IDX. Accessible via GET and POST."""
     try:
-        today = datetime.now()
+        today = get_jakarta_now()
         if today.weekday() >= 5:
             return {"status": "ok", "message": "Hari ini adalah akhir pekan (Sabtu/Minggu). Bursa tutup."}
             
         date_str = today.strftime('%Y%m%d')
         fetch_daily_data_idx_by_date(db, date_str)
-        return {"status": "ok", "message": f"Berhasil mengambil data harian IDX tanggal {date_str}"}
+        return {"status": "ok", "message": f"Berhasil mengambil data harian IDX tanggal {date_str} (WIB)"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -101,18 +101,35 @@ def fetch_historical_data_yfinance(db: Session):
 
     return {"message": f"Successfully saved {total_saved} historical price records."}
 
+def create_idx_scraper():
+    scraper = cloudscraper.create_scraper(
+        browser={
+            'browser': 'chrome',
+            'platform': 'windows',
+            'desktop': True
+        }
+    )
+    scraper.headers.update({
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Referer': 'https://www.idx.co.id/id/data-pasar/ringkasan-perdagangan/ringkasan-saham',
+        'Origin': 'https://www.idx.co.id',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+    })
+    return scraper
+
 def fetch_daily_data_idx(db: Session):
-    http = cloudscraper.CloudScraper()
+    http = create_idx_scraper()
     link = "https://idx.co.id/primary/TradingSummary/GetStockSummary?length=9999&start=0"
     
     try:
-        response = http.get(link)
+        response = http.get(link, timeout=15)
         if response.status_code != 200:
-            raise Exception(f"HTTP {response.status_code}: {response.text}")
+            raise Exception(f"HTTP {response.status_code}: {response.text[:200]}")
         result = json.loads(response.text)
     except Exception as e:
         print(f"Error fetching bulk daily data: {e}")
-        return {"message": "Gagal menarik data dari IDX."}
+        return {"status": "error", "message": f"Gagal menarik data dari IDX: {str(e)}"}
         
     data_list = result.get("data", [])
     if not data_list:

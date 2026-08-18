@@ -573,10 +573,10 @@ def run_screener(
 # ============================================================
 
 if __name__ == "__main__":
-    from datetime import datetime
+    from app.core.timezone import get_jakarta_now
     from app.db.database import SessionLocal
     
-    today = datetime.now()
+    today = get_jakarta_now()
     if today.weekday() >= 5:
         print("Hari ini adalah akhir pekan (Sabtu/Minggu). Bursa tutup, screener dilewati.")
         sys.exit(0)

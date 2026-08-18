@@ -1,12 +1,8 @@
 {
-  "crons": [
+  "rewrites": [
     {
-      "path": "/api/scrape/today",
-      "schedule": "0 10 * * 1-5"
-    },
-    {
-      "path": "/api/screener/run",
-      "schedule": "15 10 * * 1-5"
+      "source": "/(.*)",
+      "destination": "/api/index.py"
     }
   ]
 }

@@ -10,19 +10,21 @@ from time import sleep
 
 from app.db.database import SessionLocal
 from app.db.models import Company, DailyMarketData
+from app.core.timezone import get_jakarta_now
+from app.services.scraper_service import create_idx_scraper
 
 def fetch_daily_data_idx_by_date(db: Session, target_date: str):
     """
     Fetch IDX summary for a specific date.
     target_date format: YYYYMMDD
     """
-    http = cloudscraper.CloudScraper()
+    http = create_idx_scraper()
     link = f"https://idx.co.id/primary/TradingSummary/GetStockSummary?length=9999&start=0&date={target_date}"
     
     try:
-        response = http.get(link)
+        response = http.get(link, timeout=20)
         if response.status_code != 200:
-            print(f"[{target_date}] HTTP {response.status_code}: {response.text}")
+            print(f"[{target_date}] HTTP {response.status_code}: {response.text[:200]}")
             return
         result = json.loads(response.text)
     except Exception as e:
@@ -93,8 +95,8 @@ def fetch_daily_data_idx_by_date(db: Session, target_date: str):
 def fetch_past_days(days=10):
     db = SessionLocal()
     try:
-        today = datetime.now()
-        print(f"Mulai mengambil data historis harian IDX untuk {days} hari ke belakang...")
+        today = get_jakarta_now()
+        print(f"Mulai mengambil data historis harian IDX untuk {days} hari ke belakang (WIB)...")
         
         # Iterasi mundur
         for i in range(1, days + 1):
@@ -103,11 +105,8 @@ def fetch_past_days(days=10):
             if target.weekday() >= 5:
                 continue
                 
-            date_str = target.strftime('%Y%M%d')
-            # Wait, the parameter in IDX API usually uses YYYYMMDD
-            # Let's fix the strftime
-            date_str_correct = target.strftime('%Y%m%d')
-            fetch_daily_data_idx_by_date(db, date_str_correct)
+            date_str = target.strftime('%Y%m%d')
+            fetch_daily_data_idx_by_date(db, date_str)
             sleep(1) # Jeda agar tidak diblokir
             
         print("Selesai mengambil data historis harian!")

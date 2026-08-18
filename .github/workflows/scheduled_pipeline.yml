@@ -6,7 +6,22 @@ on:
     - cron: '0 10 * * 1-5'
     # 17:15 WIB (10:15 UTC) Senin - Jumat: Run Swing Screener & Send Alerts
     - cron: '15 10 * * 1-5'
-  workflow_dispatch: # Memungkinkan eksekusi manual via GitHub UI
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Pilih aksi yang ingin dijalankan'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all (Fetch Today + Screener)
+          - fetch_today
+          - screener
+          - fetch_past_daily
+      past_days:
+        description: 'Jumlah hari bursa ke belakang (jika memilih fetch_past_daily)'
+        required: false
+        default: '10'
 
 jobs:
   run-pipeline:
@@ -26,7 +41,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Execute Pipeline based on Schedule
+      - name: Execute Pipeline
         env:
           DB_HOST: ${{ secrets.DB_HOST }}
           DB_PORT: ${{ secrets.DB_PORT }}
@@ -35,21 +50,46 @@ jobs:
           DB_NAME: ${{ secrets.DB_NAME }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          INPUT_ACTION: ${{ inputs.action }}
+          INPUT_PAST_DAYS: ${{ inputs.past_days }}
         run: |
-          CURRENT_MIN=$(date -u +%M)
-          CURRENT_HOUR=$(date -u +%H)
-          echo "Current UTC Time: $CURRENT_HOUR:$CURRENT_MIN"
+          echo "=========================================="
+          echo "Timestamp UTC: $(date -u)"
+          echo "Event Name: $GITHUB_EVENT_NAME"
+          echo "=========================================="
           
-          # Jika jam 10:00 - 10:10 UTC (17:00 WIB), jalankan fetch today
-          if [ "$CURRENT_HOUR" -eq 10 ] && [ "$CURRENT_MIN" -lt 10 ]; then
-            echo "Menjalankan Fetch Today (EOD IDX Data)..."
-            python -m scripts.fetch_today
-          # Jika jam 10:11 - 10:30 UTC (17:15 WIB), jalankan screener
-          elif [ "$CURRENT_HOUR" -eq 10 ] && [ "$CURRENT_MIN" -ge 10 ]; then
-            echo "Menjalankan Screener & Telegram Alert..."
-            python -m app.services.screener
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "Eksekusi Manual dengan Aksi: $INPUT_ACTION"
+            
+            if [ "$INPUT_ACTION" = "fetch_today" ]; then
+              python -m scripts.fetch_today
+            elif [ "$INPUT_ACTION" = "screener" ]; then
+              python -m app.services.screener
+            elif [ "$INPUT_ACTION" = "fetch_past_daily" ]; then
+              python -m scripts.fetch_past_daily $INPUT_PAST_DAYS
+            else
+              # Default: 'all (Fetch Today + Screener)'
+              python -m scripts.fetch_today
+              python -m app.services.screener
+            fi
+            
           else
-            echo "Manual trigger atau jadwal lain: menjalankan fetch data lalu screener..."
-            python -m scripts.fetch_today
-            python -m app.services.screener
+            # Trigger otomatis via GitHub Schedule (Cron)
+            CURRENT_MIN=$(date -u +%M)
+            CURRENT_HOUR=$(date -u +%H)
+            echo "Current UTC Time: $CURRENT_HOUR:$CURRENT_MIN"
+            
+            # Jika jam 10:00 - 10:10 UTC (17:00 WIB), jalankan fetch today
+            if [ "$CURRENT_HOUR" -eq 10 ] && [ "$CURRENT_MIN" -lt 10 ]; then
+              echo "Menjalankan Fetch Today (EOD IDX Data)..."
+              python -m scripts.fetch_today
+            # Jika jam 10:11 - 10:30 UTC (17:15 WIB), jalankan screener
+            elif [ "$CURRENT_HOUR" -eq 10 ] && [ "$CURRENT_MIN" -ge 10 ]; then
+              echo "Menjalankan Screener & Telegram Alert..."
+              python -m app.services.screener
+            else
+              echo "Menjalankan full pipeline (Fetch Today + Screener)..."
+              python -m scripts.fetch_today
+              python -m app.services.screener
+            fi
           fi
