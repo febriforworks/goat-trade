@@ -118,12 +118,28 @@ def create_idx_scraper():
     })
     return scraper
 
+def to_int(val):
+    if val is None or pd.isna(val):
+        return None
+    try:
+        return int(float(val))
+    except (ValueError, TypeError):
+        return None
+
+def to_float(val):
+    if val is None or pd.isna(val):
+        return None
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return None
+
 def fetch_daily_data_idx(db: Session):
     http = create_idx_scraper()
     link = "https://idx.co.id/primary/TradingSummary/GetStockSummary?length=9999&start=0"
     
     try:
-        response = http.get(link, timeout=15)
+        response = http.get(link, timeout=25)
         if response.status_code != 200:
             raise Exception(f"HTTP {response.status_code}: {response.text[:200]}")
         result = json.loads(response.text)
@@ -133,62 +149,84 @@ def fetch_daily_data_idx(db: Session):
         
     data_list = result.get("data", [])
     if not data_list:
-        return {"message": "Data kosong dari IDX."}
+        return {"status": "ok", "message": "Data kosong dari IDX."}
         
-    records_to_insert = []
-    total_saved = 0
-    
-    existing_companies = {c.code for c in db.query(Company).all()}
+    existing_companies = {c.code for c in db.query(Company.code).all()}
+    new_companies = []
     
     for data in data_list:
         code = data.get("StockCode")
-        if not code or code not in existing_companies: 
+        if not code or code in existing_companies:
+            continue
+        company_name = data.get("StockName") or code
+        listed_shares = to_int(data.get("ListedShares"))
+        new_comp = Company(
+            code=code,
+            name=company_name,
+            shares=listed_shares
+        )
+        db.add(new_comp)
+        existing_companies.add(code)
+        new_companies.append(new_comp)
+
+    if new_companies:
+        db.commit()
+
+    first_row_date = data_list[0].get('Date')
+    try:
+        trade_date = datetime.strptime(first_row_date, '%Y-%m-%dT%H:%M:%S').date()
+    except Exception:
+        trade_date = pd.to_datetime(first_row_date).date()
+
+    existing_daily_codes = {
+        r[0] for r in db.query(DailyMarketData.company_code).filter(DailyMarketData.date == trade_date).all()
+    }
+
+    records_to_insert = []
+    for data in data_list:
+        code = data.get("StockCode")
+        if not code or code in existing_daily_codes: 
             continue
         
+        row_date_str = data.get('Date')
         try:
-            trade_date = datetime.strptime(data['Date'], '%Y-%m-%dT%H:%M:%S').date()
+            row_date = datetime.strptime(row_date_str, '%Y-%m-%dT%H:%M:%S').date()
         except Exception:
-            trade_date = pd.to_datetime(data['Date']).date()
+            row_date = pd.to_datetime(row_date_str).date()
             
-        exists = db.query(DailyMarketData).filter(
-            DailyMarketData.company_code == code,
-            DailyMarketData.date == trade_date
-        ).first()
-        
-        if not exists:
-            record = DailyMarketData(
-                company_code=code,
-                date=trade_date,
-                previous=data.get('Previous'),
-                open_price=data.get('OpenPrice'),
-                first_trade=data.get('FirstTrade'),
-                high=data.get('High'),
-                low=data.get('Low'),
-                close=data.get('Close'),
-                change=data.get('Change'),
-                volume=data.get('Volume'),
-                value=data.get('Value'),
-                frequency=data.get('Frequency'),
-                index_individual=data.get('IndexIndividual'),
-                offer=data.get('Offer'),
-                offer_volume=data.get('OfferVolume'),
-                bid=data.get('Bid'),
-                bid_volume=data.get('BidVolume'),
-                listed_shares=data.get('ListedShares'),
-                tradeble_shares=data.get('TradebleShares'),
-                weight_for_index=data.get('WeightForIndex'),
-                foreign_sell=data.get('ForeignSell'),
-                foreign_buy=data.get('ForeignBuy'),
-                delisting_date=pd.to_datetime(data['DelistingDate']).date() if data.get('DelistingDate') else None,
-                non_regular_volume=data.get('NonRegularVolume'),
-                non_regular_value=data.get('NonRegularValue'),
-                non_regular_frequency=data.get('NonRegularFrequency')
-            )
-            records_to_insert.append(record)
+        record = DailyMarketData(
+            company_code=code,
+            date=row_date,
+            previous=to_float(data.get('Previous')),
+            open_price=to_float(data.get('OpenPrice')),
+            first_trade=to_float(data.get('FirstTrade')),
+            high=to_float(data.get('High')),
+            low=to_float(data.get('Low')),
+            close=to_float(data.get('Close')),
+            change=to_float(data.get('Change')),
+            volume=to_int(data.get('Volume')),
+            value=to_float(data.get('Value')),
+            frequency=to_int(data.get('Frequency')),
+            index_individual=to_float(data.get('IndexIndividual')),
+            offer=to_float(data.get('Offer')),
+            offer_volume=to_int(data.get('OfferVolume')),
+            bid=to_float(data.get('Bid')),
+            bid_volume=to_int(data.get('BidVolume')),
+            listed_shares=to_int(data.get('ListedShares')),
+            tradeble_shares=to_int(data.get('TradebleShares')),
+            weight_for_index=to_float(data.get('WeightForIndex')),
+            foreign_sell=to_int(data.get('ForeignSell')),
+            foreign_buy=to_int(data.get('ForeignBuy')),
+            delisting_date=pd.to_datetime(data['DelistingDate']).date() if data.get('DelistingDate') else None,
+            non_regular_volume=to_int(data.get('NonRegularVolume')),
+            non_regular_value=to_float(data.get('NonRegularValue')),
+            non_regular_frequency=to_int(data.get('NonRegularFrequency'))
+        )
+        records_to_insert.append(record)
+        existing_daily_codes.add(code)
             
     if records_to_insert:
         db.bulk_save_objects(records_to_insert)
         db.commit()
-        total_saved += len(records_to_insert)
 
-    return {"message": f"Successfully saved {total_saved} daily market data records."}
+    return {"status": "ok", "message": f"Successfully saved {len(records_to_insert)} daily market data records (tanggal: {trade_date})."}

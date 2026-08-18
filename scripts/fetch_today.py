@@ -2,11 +2,12 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from datetime import datetime
-from app.db.database import SessionLocal
+from app.db.database import SessionLocal, init_db
 from app.core.timezone import get_jakarta_now
 from scripts.fetch_past_daily import fetch_daily_data_idx_by_date
 
 def fetch_today_data():
+    init_db()
     db = SessionLocal()
     try:
         today = get_jakarta_now()
