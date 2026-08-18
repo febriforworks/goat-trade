@@ -28,8 +28,9 @@ jobs:
 
       - name: Execute Pipeline based on Schedule
         env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DB_HOST: ${{ secrets.DB_HOST }}
-          DB_PORT: ${{ secrets.DB_PORT }}
+          DB_PORT: ${{ secrets.DB_PORT || '5432' }}
           DB_USER: ${{ secrets.DB_USER }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
           DB_NAME: ${{ secrets.DB_NAME }}
@@ -44,7 +45,7 @@ jobs:
           if [ "$CURRENT_HOUR" -eq 10 ] && [ "$CURRENT_MIN" -lt 10 ]; then
             echo "Menjalankan Fetch Today (EOD IDX Data)..."
             python -m scripts.fetch_today
-          # Jika jam 10:11 - 10:30 UTC (17:15 WIB), jalankan screener
+          # Jika jam 10:11 - 10:45 UTC (17:15 WIB), jalankan screener
           elif [ "$CURRENT_HOUR" -eq 10 ] && [ "$CURRENT_MIN" -ge 10 ]; then
             echo "Menjalankan Screener & Telegram Alert..."
             python -m app.services.screener
