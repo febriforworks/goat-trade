@@ -24,7 +24,10 @@ def fetch_today_data():
         
         print("Selesai mengambil data harian untuk hari ini!")
     finally:
-        db.close()
+        try:
+            db.close()
+        except Exception:
+            pass
 
 if __name__ == "__main__":
     fetch_today_data()

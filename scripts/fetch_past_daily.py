@@ -187,7 +187,10 @@ def fetch_past_days(days=10):
             
         print("Selesai mengambil data historis harian!")
     finally:
-        db.close()
+        try:
+            db.close()
+        except Exception:
+            pass
 
 if __name__ == "__main__":
     days_to_fetch = 15

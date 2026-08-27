@@ -472,6 +472,7 @@ def get_ihsg_regime(db: Session) -> bool:
     """Cek apakah IHSG berada di atas MA50."""
     try:
         ihsg_data = db.query(BenchmarkPrice.close).filter(BenchmarkPrice.index_code == "^JKSE").order_by(BenchmarkPrice.date.desc()).limit(50).all()
+        db.rollback() # Release transaction immediately
         if len(ihsg_data) < 50:
             return True # Asumsikan bullish jika data tidak cukup
         
@@ -483,6 +484,10 @@ def get_ihsg_regime(db: Session) -> bool:
         return current_close > ma50
     except Exception as e:
         print(f"Error checking IHSG regime: {e}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
         return True
 
 
@@ -538,32 +543,39 @@ def run_screener(
         # Hanya simpan kandidat yang lolos Hard Gates dan Breakout agar DB tidak membengkak
         db_df = result_df[(result_df["trend_ok"] == True) & (result_df["breakout_ok"] == True)]
         
-        # Hapus data screener untuk tanggal yang sama agar tidak duplikat (menghindari UniqueViolation)
-        dates_to_clear = db_df['date'].unique()
-        for d in dates_to_clear:
-            db.query(ScreenerResult).filter(ScreenerResult.date == pd.to_datetime(d).date()).delete()
+        if not db_df.empty:
+            # Hapus data screener untuk tanggal yang sama agar tidak duplikat (menghindari UniqueViolation)
+            dates_to_clear = db_df['date'].unique()
+            for d in dates_to_clear:
+                db.query(ScreenerResult).filter(ScreenerResult.date == pd.to_datetime(d).date()).delete()
+                
+            records = []
+            for _, row in db_df.iterrows():
+                record = ScreenerResult(
+                    date=pd.to_datetime(row['date']).date(),
+                    company_code=row['ticker'],
+                    score=row['score'],
+                    trend_ok=row['trend_ok'],
+                    breakout_ok=row['breakout_ok'],
+                    volume_ok=row['volume_ok'],
+                    foreign_ok=row['foreign_ok'],
+                    close_price=row['close'],
+                    transaction_value=row.get('transaction_value'),
+                    stop_loss=row.get('stop_loss'),
+                    atr=row.get('atr'),
+                    risk_pct=row.get('risk_pct')
+                )
+                records.append(record)
             
-        records = []
-        for _, row in db_df.iterrows():
-            record = ScreenerResult(
-                date=pd.to_datetime(row['date']).date(),
-                company_code=row['ticker'],
-                score=row['score'],
-                trend_ok=row['trend_ok'],
-                breakout_ok=row['breakout_ok'],
-                volume_ok=row['volume_ok'],
-                foreign_ok=row['foreign_ok'],
-                close_price=row['close'],
-                transaction_value=row.get('transaction_value'),
-                stop_loss=row.get('stop_loss'),
-                atr=row.get('atr'),
-                risk_pct=row.get('risk_pct')
-            )
-            records.append(record)
-        
-        db.bulk_save_objects(records)
-        db.commit()
-        print(f"Disimpan {len(records)} hasil screener ke database.")
+            db.bulk_save_objects(records)
+            db.commit()
+            print(f"Disimpan {len(records)} hasil screener ke database.")
+        else:
+            print("Tidak ada kandidat breakout baru yang disimpan ke database.")
+            try:
+                db.rollback()
+            except Exception:
+                pass
         
     return result_df
 
@@ -587,6 +599,7 @@ if __name__ == "__main__":
     try:
         companies = db.query(Company).all()
         watchlist = [c.code for c in companies]
+        db.rollback()  # Release connection immediately so it doesn't stay 'idle in transaction'
         
         print(f"Menjalankan screener untuk {len(watchlist)} emiten...")
         hasil = run_screener(db, watchlist, cfg, save_to_db=True)
@@ -618,4 +631,7 @@ if __name__ == "__main__":
                     if send_telegram_alert(telegram_msg):
                         print("Berhasil mengirim alert Telegram secara langsung.")
     finally:
-        db.close()
+        try:
+            db.close()
+        except Exception as e:
+            print(f"[DB] Session close notice: {e}")

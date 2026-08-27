@@ -15,9 +15,27 @@ def _create_safe_engine():
     if raw_url.startswith("postgres://"):
         raw_url = raw_url.replace("postgres://", "postgresql://", 1)
 
+    # Engine configuration options for resilient connections
+    engine_kwargs = {
+        "pool_pre_ping": True,
+        "pool_recycle": 300,
+        "pool_size": 10,
+        "max_overflow": 20,
+    }
+    
+    # TCP Keepalives for PostgreSQL to prevent idle SSL disconnection by remote servers/firewalls
+    connect_args = {
+        "keepalives": 1,
+        "keepalives_idle": 30,
+        "keepalives_interval": 10,
+        "keepalives_count": 5,
+    }
+
     try:
         url_obj = make_url(raw_url)
-        return create_engine(url_obj)
+        if "postgres" in url_obj.drivername:
+            return create_engine(url_obj, connect_args=connect_args, **engine_kwargs)
+        return create_engine(url_obj, **engine_kwargs)
     except Exception as e:
         print(f"[DB WARN] Standard make_url failed ({e}), constructing URL object via urlsplit...")
         parsed = urllib.parse.urlsplit(raw_url)
@@ -43,7 +61,7 @@ def _create_safe_engine():
             database=database,
             query=query
         )
-        return create_engine(url_obj)
+        return create_engine(url_obj, connect_args=connect_args, **engine_kwargs)
 
 # Initialize Database Engine
 engine = _create_safe_engine()
