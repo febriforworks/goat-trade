@@ -1,10 +1,10 @@
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import cloudscraper
+from app.services.scraper_service import create_idx_scraper
 import json
 
-http = cloudscraper.CloudScraper()
+http = create_idx_scraper()
 url = "https://idx.co.id/primary/TradingSummary/GetStockSummary?length=10&start=0"
 
 print(f"Fetching {url}")

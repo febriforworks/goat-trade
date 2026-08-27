@@ -28,23 +28,47 @@ def to_float(val):
     except (ValueError, TypeError):
         return None
 
-def fetch_daily_data_idx_by_date(db: Session, target_date: str):
+def fetch_daily_data_idx_by_date(db: Session, target_date: str, http_session=None):
     """
     Fetch IDX summary for a specific date.
     target_date format: YYYYMMDD
     """
-    http = create_idx_scraper()
+    # 0. Cek terlebih dahulu apakah data tanggal ini sudah lengkap di DB (opsional hemat request)
+    try:
+        parsed_target = datetime.strptime(target_date, "%Y%m%d").date()
+        count_existing = db.query(DailyMarketData.id).filter(DailyMarketData.date == parsed_target).count()
+        if count_existing > 500:
+            print(f"[{target_date}] INFO: Data tanggal {parsed_target} sudah ada di database ({count_existing} records). Melewati request ke IDX.")
+            return
+    except Exception:
+        pass
+
+    http = http_session or create_idx_scraper()
     link = f"https://idx.co.id/primary/TradingSummary/GetStockSummary?length=9999&start=0&date={target_date}"
     
     print(f"[{target_date}] Mengirim request ke IDX API: {link}")
-    try:
-        response = http.get(link, timeout=25)
-        if response.status_code != 200:
-            print(f"[{target_date}] Gagal: HTTP {response.status_code}: {response.text[:200]}")
-            return
-        result = json.loads(response.text)
-    except Exception as e:
-        print(f"[{target_date}] Error fetching data dari IDX: {e}")
+    result = None
+    for attempt in range(1, 4):
+        try:
+            response = http.get(link, timeout=25)
+            if response.status_code == 200:
+                try:
+                    result = json.loads(response.text)
+                    break
+                except Exception:
+                    print(f"[{target_date}] (Percobaan {attempt}/3) Respons bukan format JSON valid.")
+            else:
+                print(f"[{target_date}] (Percobaan {attempt}/3) Gagal HTTP {response.status_code}: {response.text[:150]}")
+        except Exception as e:
+            print(f"[{target_date}] (Percobaan {attempt}/3) Error fetching data dari IDX: {e}")
+        
+        if attempt < 3:
+            sleep(2 * attempt)
+            # Recreate session baru jika kena block/403 agar cookies Cloudflare ter-refresh
+            http = create_idx_scraper()
+
+    if result is None:
+        print(f"[{target_date}] Gagal mengambil data setelah 3 percobaan.")
         return
         
     data_list = result.get("data", [])
@@ -147,6 +171,7 @@ def fetch_past_days(days=10):
     init_db()
     db = SessionLocal()
     try:
+        http = create_idx_scraper()
         today = get_jakarta_now()
         print(f"Mulai mengambil data historis harian IDX untuk {days} hari ke belakang (WIB)...")
         
@@ -157,8 +182,8 @@ def fetch_past_days(days=10):
                 continue
                 
             date_str = target.strftime('%Y%m%d')
-            fetch_daily_data_idx_by_date(db, date_str)
-            sleep(1) # Jeda agar sopan dan tidak diblokir
+            fetch_daily_data_idx_by_date(db, date_str, http_session=http)
+            sleep(2) # Jeda agar tidak terkena rate-limit / Cloudflare WAF
             
         print("Selesai mengambil data historis harian!")
     finally:

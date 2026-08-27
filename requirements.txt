@@ -9,4 +9,5 @@ uvicorn[standard]
 pydantic
 pydantic-settings
 cloudscraper
+curl_cffi
 openpyxl
