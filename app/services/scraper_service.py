@@ -106,15 +106,13 @@ def fetch_historical_data_yfinance(db: Session):
 
     return {"message": f"Successfully saved {total_saved} historical price records."}
 
-def create_idx_scraper():
+def create_idx_scraper(impersonate_browser: str = "chrome120"):
     if HAS_CURL_CFFI:
-        scraper = cffi_requests.Session(impersonate="chrome120")
+        scraper = cffi_requests.Session(impersonate=impersonate_browser)
         scraper.headers.update({
             'Accept': 'application/json, text/plain, */*',
             'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
-            'Referer': 'https://www.idx.co.id/id/data-pasar/ringkasan-perdagangan/ringkasan-saham',
-            'Origin': 'https://www.idx.co.id',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+            'Referer': 'https://idx.co.id/',
         })
         return scraper
 
@@ -128,9 +126,7 @@ def create_idx_scraper():
     scraper.headers.update({
         'Accept': 'application/json, text/plain, */*',
         'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Referer': 'https://www.idx.co.id/id/data-pasar/ringkasan-perdagangan/ringkasan-saham',
-        'Origin': 'https://www.idx.co.id',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+        'Referer': 'https://idx.co.id/',
     })
     return scraper
 
@@ -151,12 +147,16 @@ def to_float(val):
         return None
 
 def fetch_daily_data_idx(db: Session):
-    http = create_idx_scraper()
+    browsers = ["chrome120", "chrome124", "safari17_0"]
+    http = create_idx_scraper(browsers[0])
     link = "https://idx.co.id/primary/TradingSummary/GetStockSummary?length=9999&start=0"
     
     result = None
     last_error = None
     for attempt in range(1, 4):
+        browser_choice = browsers[(attempt - 1) % len(browsers)]
+        if attempt > 1:
+            http = create_idx_scraper(impersonate_browser=browser_choice)
         try:
             response = http.get(link, timeout=25)
             if response.status_code == 200:
@@ -164,14 +164,13 @@ def fetch_daily_data_idx(db: Session):
                 break
             else:
                 last_error = f"HTTP {response.status_code}: {response.text[:200]}"
-                print(f"[Daily] (Percobaan {attempt}/3) {last_error}")
+                print(f"[Daily] (Percobaan {attempt}/3 - {browser_choice}) {last_error}")
         except Exception as e:
             last_error = str(e)
-            print(f"[Daily] (Percobaan {attempt}/3) Error fetching data: {e}")
+            print(f"[Daily] (Percobaan {attempt}/3 - {browser_choice}) Error fetching data: {e}")
         
         if attempt < 3:
             sleep(2 * attempt)
-            http = create_idx_scraper()
 
     if result is None:
         print(f"Error fetching bulk daily data: {last_error}")

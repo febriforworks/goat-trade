@@ -43,12 +43,16 @@ def fetch_daily_data_idx_by_date(db: Session, target_date: str, http_session=Non
     except Exception:
         pass
 
-    http = http_session or create_idx_scraper()
+    browsers = ["chrome120", "chrome124", "safari17_0"]
+    http = http_session or create_idx_scraper(browsers[0])
     link = f"https://idx.co.id/primary/TradingSummary/GetStockSummary?length=9999&start=0&date={target_date}"
     
     print(f"[{target_date}] Mengirim request ke IDX API: {link}")
     result = None
     for attempt in range(1, 4):
+        browser_choice = browsers[(attempt - 1) % len(browsers)]
+        if attempt > 1:
+            http = create_idx_scraper(impersonate_browser=browser_choice)
         try:
             response = http.get(link, timeout=25)
             if response.status_code == 200:
@@ -56,16 +60,14 @@ def fetch_daily_data_idx_by_date(db: Session, target_date: str, http_session=Non
                     result = json.loads(response.text)
                     break
                 except Exception:
-                    print(f"[{target_date}] (Percobaan {attempt}/3) Respons bukan format JSON valid.")
+                    print(f"[{target_date}] (Percobaan {attempt}/3 - {browser_choice}) Respons bukan format JSON valid.")
             else:
-                print(f"[{target_date}] (Percobaan {attempt}/3) Gagal HTTP {response.status_code}: {response.text[:150]}")
+                print(f"[{target_date}] (Percobaan {attempt}/3 - {browser_choice}) Gagal HTTP {response.status_code}: {response.text[:150]}")
         except Exception as e:
-            print(f"[{target_date}] (Percobaan {attempt}/3) Error fetching data dari IDX: {e}")
+            print(f"[{target_date}] (Percobaan {attempt}/3 - {browser_choice}) Error fetching data dari IDX: {e}")
         
         if attempt < 3:
-            sleep(2 * attempt)
-            # Recreate session baru jika kena block/403 agar cookies Cloudflare ter-refresh
-            http = create_idx_scraper()
+            sleep(3 * attempt)
 
     if result is None:
         print(f"[{target_date}] Gagal mengambil data setelah 3 percobaan.")
